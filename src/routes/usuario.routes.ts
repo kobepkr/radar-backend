@@ -241,4 +241,33 @@ router.post("/push-token", authMiddleware, async (req: AuthRequest, res) => {
   }
 });
 
+// ============================================
+// HACER PREMIUM (SOLO PARA PRUEBAS) - POST /api/usuarios/make-premium
+// ============================================
+router.post("/make-premium", authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const usuario = await Usuario.findByIdAndUpdate(
+      req.usuario.id,
+      { 
+        premium: true, 
+        premiumDesde: new Date(),
+        premiumHasta: new Date(new Date().setFullYear(new Date().getFullYear() + 1))
+      },
+      { new: true }
+    );
+    
+    res.json({ 
+      message: "✅ Usuario ahora es premium (modo pruebas)",
+      usuario: {
+        id: usuario?._id,
+        nombre: usuario?.nombre,
+        premium: usuario?.premium
+      }
+    });
+  } catch (error) {
+    console.error("Error haciendo premium:", error);
+    res.status(500).json({ error: "Error al hacer premium" });
+  }
+});
+
 export default router;

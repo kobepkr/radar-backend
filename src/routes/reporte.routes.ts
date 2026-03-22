@@ -1,5 +1,5 @@
 import express from "express";
-import { Reporte } from "../models/reporte";
+import { Reporte, IReporte } from "../models/reporte";
 import { authMiddleware, AuthRequest } from "../middlewares/auth.middleware";
 import { Usuario } from "../models/Usuario";
 import { io } from '../index'; 
@@ -10,60 +10,41 @@ const router = express.Router();
 
 console.log("🟢 Archivo reporte.routes.ts cargado");
 
-
-// Mapa de categorías según el tipo de evento (CORREGIDO - incluye tipos antiguos)
+// Mapa de categorías
 const categoriaMap: { [key: string]: string } = {
-  // 🚗 TIPOS ANTIGUOS (los que usa la app)
   accidente: "transito",
   delito: "seguridad",
   trafico: "transito",
   clima: "clima",
   incendio: "emergencias",
-  
-  // 🚗 TRANSITO (nuevos)
   embotellamiento: "transito",
   choque: "transito",
   semaforoRoto: "transito",
   calleCortada: "transito",
-  
-  // 🚨 SEGURIDAD (nuevos)
   asalto: "seguridad",
   actitudSospechosa: "seguridad",
   balacera: "seguridad",
-  
-  // 🚑 EMERGENCIAS (nuevos)
   inundacion: "emergencias",
-  
-  // 🏘️ COMUNIDAD (nuevos)
   bache: "comunidad",
   corteLuz: "comunidad",
   corteAgua: "comunidad"
 };
 
-// Tiempos de expiración en horas (CORREGIDO - incluye tipos antiguos)
+// Tiempos de expiración
 const horasExpiracion: { [key: string]: number } = {
-  // 🚗 TIPOS ANTIGUOS
   accidente: 4,
   delito: 12,
   trafico: 2,
   clima: 8,
   incendio: 12,
-  
-  // 🚗 TRANSITO (nuevos)
   embotellamiento: 2,
   choque: 4,
   semaforoRoto: 8,
   calleCortada: 6,
-  
-  // 🚨 SEGURIDAD (nuevos)
   asalto: 12,
   actitudSospechosa: 2,
   balacera: 24,
-  
-  // 🚑 EMERGENCIAS (nuevos)
   inundacion: 8,
-  
-  // 🏘️ COMUNIDAD (nuevos)
   bache: 72,
   corteLuz: 4,
   corteAgua: 6
@@ -76,12 +57,10 @@ router.post("/", authMiddleware, verificarLimiteReportes, async (req: AuthReques
   try {
     const { tipo, descripcion, lat, lng } = req.body;
 
-    // Validar que el tipo existe en el mapa
     if (!categoriaMap[tipo]) {
       return res.status(400).json({ error: "Tipo de evento no válido" });
     }
 
-    // Calcular expiración
     const expiraEn = new Date();
     expiraEn.setHours(expiraEn.getHours() + (horasExpiracion[tipo] || 6));
 
@@ -98,12 +77,10 @@ router.post("/", authMiddleware, verificarLimiteReportes, async (req: AuthReques
 
     await nuevoReporte.save();
 
-    // ✅ INCREMENTAR CONTADOR DIARIO (solo si NO es premium)
     const usuario = await Usuario.findById(req.usuario.id);
     
     if (!usuario?.premium) {
       const hoy = new Date().toISOString().split('T')[0];
-      
       await ReporteDiario.findOneAndUpdate(
         { usuarioId: req.usuario.id, fecha: hoy },
         { $inc: { contador: 1 } },
@@ -114,9 +91,8 @@ router.post("/", authMiddleware, verificarLimiteReportes, async (req: AuthReques
       console.log(`⭐ Usuario premium ${req.usuario.id} - sin límite`);
     }
 
-    // 👇 NOTIFICACIONES AUTOMÁTICAS (push notifications)
+    // Notificaciones push
     try {
-      // Buscar usuarios con token a menos de 5km (excluyendo al creador)
       const usuariosCerca = await Usuario.find({
         ubicacion: {
           $near: {
@@ -124,26 +100,20 @@ router.post("/", authMiddleware, verificarLimiteReportes, async (req: AuthReques
               type: "Point",
               coordinates: [lng, lat]
             },
-            $maxDistance: 5000 // 5km en metros
+            $maxDistance: 5000
           }
         },
         pushToken: { $exists: true, $ne: null },
-        _id: { $ne: req.usuario.id } // Excluir al creador
+        _id: { $ne: req.usuario.id }
       });
 
-      // Enviar notificaciones
       for (const usuario of usuariosCerca) {
         const message = {
           to: usuario.pushToken,
           sound: 'default',
           title: '🚨 Nuevo reporte cerca',
           body: `${tipo} reportado en tu zona`,
-          data: { 
-            reporteId: nuevoReporte._id,
-            tipo,
-            lat,
-            lng
-          }
+          data: { reporteId: nuevoReporte._id, tipo, lat, lng }
         };
 
         await fetch('https://exp.host/--/api/v2/push/send', {
@@ -154,10 +124,8 @@ router.post("/", authMiddleware, verificarLimiteReportes, async (req: AuthReques
       }
     } catch (notifError) {
       console.error('Error enviando notificaciones:', notifError);
-      // No interrumpimos la creación del reporte
     }
 
-    // 👇 EMITIR EVENTO WEBSOCKET A TODOS LOS CLIENTES
     io.emit('nuevo-reporte', nuevoReporte);
     console.log('📢 Evento WebSocket "nuevo-reporte" emitido');
 
@@ -207,62 +175,26 @@ router.get("/cercanos", async (req, res) => {
 // ============================================
 router.get("/filtros", async (req, res) => {
   try {
-    const { 
-      categoria, 
-      tipo, 
-      estado, 
-      desde, 
-      hasta, 
-      creadoPor, 
-      limit = 50,
-      orden = "desc" 
-    } = req.query;
-
-    // Construir filtro dinámico
+    const { categoria, tipo, estado, desde, hasta, creadoPor, limit = 50, orden = "desc" } = req.query;
     const filtro: any = {};
 
     if (categoria) filtro.categoria = categoria;
     if (tipo) filtro.tipo = tipo;
     if (estado) filtro.estado = estado;
-    if (creadoPor) filtro.creadoPor = creadoPor; 
-
-    // Filtro por fechas
+    if (creadoPor) filtro.creadoPor = creadoPor;
     if (desde || hasta) {
       filtro.createdAt = {};
       if (desde) filtro.createdAt.$gte = new Date(desde as string);
       if (hasta) filtro.createdAt.$lte = new Date(hasta as string);
     }
 
-    // Ordenamiento
     const ordenamiento = orden === "asc" ? 1 : -1;
+    const reportes = await Reporte.find(filtro).sort({ createdAt: ordenamiento }).limit(Number(limit));
 
-    // Ejecutar consulta
-    const reportes = await Reporte.find(filtro)
-      .sort({ createdAt: ordenamiento })
-      .limit(Number(limit));
-
-    // Respuesta con metadatos
-    res.json({
-      success: true,
-      total: reportes.length,
-      filtros: {
-        categoria: categoria || "todos",
-        tipo: tipo || "todos",
-        estado: estado || "todos",
-        desde: desde || "siempre",
-        hasta: hasta || "ahora",
-        limit: Number(limit),
-        orden: orden === "asc" ? "más antiguos" : "más recientes"
-      },
-      reportes
-    });
-
+    res.json({ success: true, total: reportes.length, reportes });
   } catch (error) {
     console.error("❌ Error en filtros:", error);
-    res.status(500).json({ 
-      success: false, 
-      error: "Error al filtrar reportes" 
-    });
+    res.status(500).json({ error: "Error al filtrar reportes" });
   }
 });
 
@@ -271,9 +203,7 @@ router.get("/filtros", async (req, res) => {
 // ============================================
 router.get("/", async (req, res) => {
   try {
-    const reportes = await Reporte.find()
-      .sort({ createdAt: -1 })
-      .limit(100);
+    const reportes = await Reporte.find().sort({ createdAt: -1 }).limit(100);
     res.json(reportes);
   } catch (error) {
     console.error("❌ Error al obtener todos los reportes:", error);
@@ -287,9 +217,7 @@ router.get("/", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const reporte = await Reporte.findById(req.params.id);
-    if (!reporte) {
-      return res.status(404).json({ error: "Reporte no encontrado" });
-    }
+    if (!reporte) return res.status(404).json({ error: "Reporte no encontrado" });
     res.json(reporte);
   } catch (error) {
     console.error("❌ Error al obtener reporte:", error);
@@ -298,131 +226,49 @@ router.get("/:id", async (req, res) => {
 });
 
 // ============================================
-// CONFIRMAR REPORTE (PROTEGIDO)
+// CONFIRMAR REPORTE (POST /api/reportes/:id/confirmar)
 // ============================================
 router.post("/:id/confirmar", authMiddleware, async (req: AuthRequest, res) => {
   try {
     const reporte = await Reporte.findById(req.params.id);
-    
-    if (!reporte) {
-      return res.status(404).json({ error: "Reporte no encontrado" });
-    }
+    if (!reporte) return res.status(404).json({ error: "Reporte no encontrado" });
 
-    // Verificar si el usuario ya confirmó
     const yaConfirmo = reporte.confirmadoPor?.includes(req.usuario.id);
-    
-    if (yaConfirmo) {
-      return res.status(400).json({ error: "Ya confirmaste este reporte anteriormente" });
-    }
+    if (yaConfirmo) return res.status(400).json({ error: "Ya confirmaste este reporte" });
 
     reporte.confirmaciones += 1;
     reporte.confirmadoPor?.push(req.usuario.id);
-    
-    if (reporte.confirmaciones >= 3) {
-      reporte.estado = "confirmado";
-    }
-
+    if (reporte.confirmaciones >= 3) reporte.estado = "confirmado";
     await reporte.save();
 
-    // 👇 EMITIR EVENTO DE CONFIRMACIÓN
     io.emit('reporte-actualizado', reporte);
-    console.log(`📢 Evento "reporte-actualizado" emitido para reporte ${reporte._id}`);
-
     res.json(reporte);
-
   } catch (error) {
     console.error("❌ Error al confirmar reporte:", error);
     res.status(500).json({ error: "Error al confirmar reporte" });
   }
 });
 
-
-router.post("/test-notification", async (req, res) => {
-  try {
-    const { to, title, body, sound = 'default' } = req.body;
-    
-    const message = {
-      to,
-      sound,
-      title: title || 'Radar Urbano',
-      body: body || 'Notificación de prueba',
-      priority: 'high',
-      data: { type: 'test' },
-    };
-
-    console.log('📤 Enviando a Expo:', message);
-
-    const response = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(message),
-    });
-
-    const result = await response.json();
-    console.log('📱 Respuesta de Expo:', JSON.stringify(result, null, 2));
-
-    res.json({ 
-      success: true, 
-      message: 'Notificación enviada', 
-      expoResponse: result 
-    });
-
-  } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ error: 'Error al enviar notificación' });
-  }
-});
-
-
 // ============================================
-// REPORTAR COMO FALSO (PROTEGIDO)
+// REPORTAR COMO FALSO (POST /api/reportes/:id/reportar-falso)
 // ============================================
 router.post("/:id/reportar-falso", authMiddleware, async (req: AuthRequest, res) => {
   try {
     const reporte = await Reporte.findById(req.params.id);
-    
-    if (!reporte) {
-      return res.status(404).json({ error: "Reporte no encontrado" });
-    }
+    if (!reporte) return res.status(404).json({ error: "Reporte no encontrado" });
 
     reporte.reportesFalsos += 1;
-    
     if (reporte.reportesFalsos >= 3) {
       reporte.estado = "falso";
       reporte.archivado = true;
     }
-
     await reporte.save();
 
-    // ============================================
-// HACER PREMIUM (SOLO PARA PRUEBAS)
-// ============================================
-router.post("/make-premium", authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const usuario = await Usuario.findByIdAndUpdate(
-      req.usuario.id,
-      { 
-        premium: true, 
-        premiumDesde: new Date(),
-        premiumHasta: new Date(new Date().setFullYear(new Date().getFullYear() + 1))
-      },
-      { new: true }
-    );
-    
-    res.json({ 
-      message: "✅ Usuario ahora es premium (modo pruebas)",
-      usuario: {
-        id: usuario?._id,
-        nombre: usuario?.nombre,
-        premium: usuario?.premium
-      }
-    });
+    io.emit('reporte-actualizado', reporte);
+    res.json(reporte);
   } catch (error) {
-    console.error("Error haciendo premium:", error);
-    res.status(500).json({ error: "Error al hacer premium" });
+    console.error("❌ Error al reportar como falso:", error);
+    res.status(500).json({ error: "Error al reportar como falso" });
   }
 });
 
@@ -432,78 +278,106 @@ router.post("/make-premium", authMiddleware, async (req: AuthRequest, res) => {
 router.post("/:id/reaccionar", authMiddleware, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const { tipo } = req.body; // 'like', 'urgente', 'peligro'
+    const { tipo } = req.body;
     
-    // Verificar si el usuario es premium
     const usuario = await Usuario.findById(req.usuario.id);
+    if (!usuario) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!usuario.premium) return res.status(403).json({ error: "Solo usuarios premium pueden reaccionar" });
     
-    if (!usuario) {
-      return res.status(404).json({ error: "Usuario no encontrado" });
-    }
-    
-    if (!usuario.premium) {
-      return res.status(403).json({ 
-        error: "Solo usuarios premium pueden reaccionar a reportes",
-        es_premium: false
-      });
-    }
-    
-    // Buscar reporte
     const reporte = await Reporte.findById(id);
+    if (!reporte) return res.status(404).json({ error: "Reporte no encontrado" });
     
-    if (!reporte) {
-      return res.status(404).json({ error: "Reporte no encontrado" });
-    }
-    
-    // Tipos válidos de reacción
     const tiposValidos = ['like', 'urgente', 'peligro'];
-    if (!tiposValidos.includes(tipo)) {
-      return res.status(400).json({ error: "Tipo de reacción no válido" });
-    }
+    if (!tiposValidos.includes(tipo)) return res.status(400).json({ error: "Tipo no válido" });
     
-    // ✅ INICIALIZAR reacciones si no existe
-    if (!reporte.reacciones) {
-      reporte.reacciones = { like: 0, urgente: 0, peligro: 0 };
-    }
+    if (!reporte.reacciones) reporte.reacciones = { like: 0, urgente: 0, peligro: 0 };
     
-    // ✅ INCREMENTAR según el tipo
-    if (tipo === 'like') {
-      reporte.reacciones.like = (reporte.reacciones.like || 0) + 1;
-    } else if (tipo === 'urgente') {
-      reporte.reacciones.urgente = (reporte.reacciones.urgente || 0) + 1;
-    } else if (tipo === 'peligro') {
-      reporte.reacciones.peligro = (reporte.reacciones.peligro || 0) + 1;
-    }
+    if (tipo === 'like') reporte.reacciones.like = (reporte.reacciones.like || 0) + 1;
+    else if (tipo === 'urgente') reporte.reacciones.urgente = (reporte.reacciones.urgente || 0) + 1;
+    else if (tipo === 'peligro') reporte.reacciones.peligro = (reporte.reacciones.peligro || 0) + 1;
     
     await reporte.save();
-    
-    // Emitir evento WebSocket para actualizar en tiempo real
     io.emit('reporte-actualizado', reporte);
-    console.log(`📢 Reacción ${tipo} agregada al reporte ${id}`);
     
-    res.json({ 
-      success: true, 
-      reacciones: reporte.reacciones,
-      mensaje: `👍 Reacción ${tipo} agregada`
-    });
-    
+    res.json({ success: true, reacciones: reporte.reacciones });
   } catch (error) {
     console.error("❌ Error al reaccionar:", error);
-    res.status(500).json({ error: "Error al reaccionar al reporte" });
+    res.status(500).json({ error: "Error al reaccionar" });
   }
 });
 
-
-
-    // 👇 EMITIR EVENTO DE ACTUALIZACIÓN (igual que con confirmar)
-    io.emit('reporte-actualizado', reporte);
-    console.log(`📢 Evento "reporte-actualizado" emitido para reporte falso ${reporte._id}`);
-
-    res.json(reporte);
-
+// ============================================
+// AGREGAR COMENTARIO (POST /api/reportes/:id/comentarios)
+// ============================================
+router.post("/:id/comentarios", authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { texto } = req.body;
+    
+    const usuario = await Usuario.findById(req.usuario.id);
+    if (!usuario) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!usuario.premium) return res.status(403).json({ error: "Solo usuarios premium pueden comentar" });
+    if (!texto || texto.trim().length === 0) return res.status(400).json({ error: "El comentario no puede estar vacío" });
+    if (texto.length > 300) return res.status(400).json({ error: "Máximo 300 caracteres" });
+    
+    const result = await Reporte.updateOne(
+      { _id: id },
+      {
+        $push: {
+          comentarios: {
+            usuarioId: req.usuario.id,
+            nombre: usuario.nombre,
+            texto: texto.trim(),
+            createdAt: new Date()
+          }
+        }
+      }
+    );
+    
+    if (result.matchedCount === 0) return res.status(404).json({ error: "Reporte no encontrado" });
+    
+    const reporteActualizado = await Reporte.findById(id);
+    if (reporteActualizado) io.emit('reporte-actualizado', reporteActualizado);
+    
+    console.log(`💬 Comentario agregado al reporte ${id}`);
+    res.json({ success: true, mensaje: "Comentario agregado correctamente" });
   } catch (error) {
-    console.error("❌ Error al reportar como falso:", error);
-    res.status(500).json({ error: "Error al reportar como falso" });
+    console.error("❌ Error al agregar comentario:", error);
+    res.status(500).json({ error: "Error al agregar comentario" });
   }
 });
+
+// ============================================
+// OBTENER COMENTARIOS (GET /api/reportes/:id/comentarios)
+// ============================================
+router.get("/:id/comentarios", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const reporte = await Reporte.findById(id).select('comentarios').lean();
+    if (!reporte) return res.status(404).json({ error: "Reporte no encontrado" });
+    
+    const comentarios = (reporte as any).comentarios || [];
+    res.json({ success: true, comentarios, total: comentarios.length });
+  } catch (error) {
+    console.error("❌ Error al obtener comentarios:", error);
+    res.status(500).json({ error: "Error al obtener comentarios" });
+  }
+});
+
+// ============================================
+// TEST NOTIFICACION (POST /api/reportes/test-notification)
+// ============================================
+router.post("/test-notification", async (req, res) => {
+  try {
+    const { to, title, body, sound = 'default' } = req.body;
+    const message = { to, sound, title: title || 'Radar Urbano', body: body || 'Notificación de prueba', priority: 'high', data: { type: 'test' } };
+    const response = await fetch('https://exp.host/--/api/v2/push/send', { method: 'POST', headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(message) });
+    const result = await response.json();
+    res.json({ success: true, expoResponse: result });
+  } catch (error) {
+    console.error('❌ Error:', error);
+    res.status(500).json({ error: 'Error al enviar notificación' });
+  }
+});
+
 export default router;
