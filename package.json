@@ -23,6 +23,7 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "ts-node": "^10.9.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
