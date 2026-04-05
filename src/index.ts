@@ -21,6 +21,8 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
+console.log('🔑 MONGO_URI:', process.env.MONGO_URI);
+
 // Conectar a MongoDB
 mongoose.connect(process.env.MONGO_URI as string)
   .then(() => console.log("🔥 MongoDB conectado"))
